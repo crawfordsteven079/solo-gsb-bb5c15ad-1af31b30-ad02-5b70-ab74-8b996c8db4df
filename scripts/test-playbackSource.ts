@@ -6,7 +6,9 @@ import { AudioEngine, StaleDecodeError } from '../src/audio/AudioEngine';
  *   必须播放新文件的原始缓冲，旧的处理后缓冲不得残留为播放源；
  * - 被取代的旧解码完成时不得夺回播放源（StaleDecodeError）；
  * - 解码失败（坏文件）不改动当前播放源；
- * - 主播放从处理后试听切回原声时按 getTime() 保留当前播放位置。
+ * - 主播放从处理后试听切回原声时按 getTime() 保留当前播放位置；
+ * - 共用定位链路（波形空白点击 / 章节列表跳转）按操作前的播放状态处理：
+ *   播放中定位须切回原始缓冲并从目标秒数继续播放，暂停时定位不得启动新音源。
  */
 
 let failures = 0;
@@ -264,6 +266,49 @@ async function main() {
     same(ctx.lastSource().buffer, other, 'play 显式指定缓冲时优先使用');
     engine.play(0.6, 1.2);
     same(ctx.lastSource().buffer, orig, '未指定时回到归属缓冲（原始）');
+    engine.dispose();
+  }
+
+  // ---- 场景 6：共用定位链路按操作前的播放状态处理旧音源与播放源归属 ----
+  {
+    const engine = new AudioEngine();
+    const ctx = engine.getContext() as unknown as FakeAudioContext;
+    const orig = buf('原始', 100);
+    const processed = buf('处理后', 100);
+    ctx.autoDecodeQueue = [orig];
+    await engine.decode(fakeFile());
+
+    // App 侧共用定位链路（修复后顺序）：先读操作前播放状态，
+    // 再停止旧音源并切回原始缓冲，最后按之前的状态决定是否续播。
+    const seekTo = (t: number) => {
+      const wasPlaying = engine.playing;
+      engine.stop();
+      engine.setPlaybackBuffer(null);
+      if (wasPlaying) engine.play(t);
+    };
+
+    // 6a：原声播放中定位 → 从目标秒数继续播放原声
+    engine.play(5);
+    seekTo(20);
+    ok(engine.playing, '原声播放中定位：仍在播放');
+    same(ctx.lastSource().buffer, orig, '原声播放中定位：播放源为原始缓冲');
+    approx(ctx.lastSource().startOffset, 20, 1e-9, '原声播放中定位：从目标秒数继续播放');
+
+    // 6b：试听处理后音频中定位 → 切回原声并从目标秒数继续播放
+    engine.setPlaybackBuffer(asAudioBuffer(processed));
+    engine.play(3);
+    same(ctx.lastSource().buffer, processed, '试听中：播放源为处理后缓冲');
+    seekTo(30);
+    ok(engine.playing, '试听中定位：仍在播放');
+    same(ctx.lastSource().buffer, orig, '试听中定位：播放源切回原始缓冲');
+    approx(ctx.lastSource().startOffset, 30, 1e-9, '试听中定位：从目标秒数继续播放');
+
+    // 6c：暂停时定位 → 只定位，不启动新音源
+    engine.pause();
+    const sourcesBefore = ctx.sources.length;
+    seekTo(40);
+    ok(!engine.playing, '暂停时定位：保持暂停');
+    same(ctx.sources.length, sourcesBefore, '暂停时定位：未创建新音源');
     engine.dispose();
   }
 

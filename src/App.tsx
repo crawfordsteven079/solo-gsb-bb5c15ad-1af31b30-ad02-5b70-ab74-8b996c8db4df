@@ -597,16 +597,19 @@ export default function App() {
 
   const seek = useCallback(
     (t: number) => {
+      // 先记录操作前的播放状态：stopAudition 内部会停止引擎，
+      // 之后再读 engine.playing 永远得到 false（播放中定位会被误停播）。
+      const wasPlaying = engine.playing;
       // 试听处理后音频时点波形：停止试听、切回原始缓冲，再按普通逻辑跳转
       stopAudition();
-      const wasPlaying = engine.playing;
-      engine.stop();
       previewRef.current = null;
       setPlayhead(t);
       if (wasPlaying) {
+        // 原先在播放（原声或处理后试听）：切回原声并从目标秒数继续播放
         engine.play(t);
         setPlaying(true);
       } else {
+        // 原先暂停：只定位，保持暂停
         setPlaying(false);
       }
     },
