@@ -6,7 +6,10 @@ import { AudioEngine, StaleDecodeError } from '../src/audio/AudioEngine';
  *   必须播放新文件的原始缓冲，旧的处理后缓冲不得残留为播放源；
  * - 被取代的旧解码完成时不得夺回播放源（StaleDecodeError）；
  * - 解码失败（坏文件）不改动当前播放源；
- * - 主播放从处理后试听切回原声时按 getTime() 保留当前播放位置。
+ * - 主播放从处理后试听切回原声时按 getTime() 保留当前播放位置；
+ * - 共用定位链路（波形空白点击 / 章节跳转）按操作前的播放状态处理：
+ *   先读 playing 再拆旧音源，播放中定位从目标秒数继续播放原声，
+ *   暂停时定位不启动新音源。
  */
 
 let failures = 0;
@@ -264,6 +267,60 @@ async function main() {
     same(ctx.lastSource().buffer, other, 'play 显式指定缓冲时优先使用');
     engine.play(0.6, 1.2);
     same(ctx.lastSource().buffer, orig, '未指定时回到归属缓冲（原始）');
+    engine.dispose();
+  }
+
+  // ---- 场景 6：共用定位链路按操作前的播放状态处理（波形空白点击 / 章节跳转）----
+  // App 侧 seek 的调用顺序契约：先读 engine.playing，再 stop + 切回原始缓冲，
+  // 原先在播放则从目标秒数继续播放原声，原先暂停则只定位。若先 stop 再读
+  // playing，结果恒为 false，播放中定位会意外停播（回归）。
+  {
+    const engine = new AudioEngine();
+    const ctx = engine.getContext() as unknown as FakeAudioContext;
+    const orig = buf('原始', 100);
+    const processed = buf('处理后', 100);
+    ctx.autoDecodeQueue = [orig];
+    await engine.decode(fakeFile());
+
+    // 6a：原声播放中定位 → 从目标秒数继续播放原声
+    engine.play(2);
+    {
+      const wasPlaying = engine.playing; // 必须先于 stop 读取
+      engine.stop();
+      engine.setPlaybackBuffer(null);
+      ok(wasPlaying, '播放中定位：操作前状态为播放中');
+      if (wasPlaying) engine.play(6);
+      same(ctx.lastSource().buffer, orig, '播放中定位：继续播放的是原始缓冲');
+      approx(ctx.lastSource().startOffset, 6, 1e-9, '播放中定位：从目标秒数继续播放');
+      ok(engine.playing, '播放中定位：定位后仍在播放');
+    }
+
+    // 6b：试听处理后音频中定位 → 切回原声并从目标秒数继续播放
+    engine.setPlaybackBuffer(asAudioBuffer(processed));
+    engine.play(1);
+    same(ctx.lastSource().buffer, processed, '试听中：播放源为处理后缓冲');
+    {
+      const wasPlaying = engine.playing;
+      engine.stop();
+      engine.setPlaybackBuffer(null); // stopAudition：切回原始缓冲
+      ok(wasPlaying, '试听中定位：操作前状态为播放中');
+      if (wasPlaying) engine.play(4);
+      same(ctx.lastSource().buffer, orig, '试听中定位：切回原始缓冲继续播放');
+      approx(ctx.lastSource().startOffset, 4, 1e-9, '试听中定位：从目标秒数继续播放');
+    }
+
+    // 6c：暂停时定位 → 只定位，不启动新音源
+    engine.stop(); // 暂停
+    {
+      const wasPlaying = engine.playing;
+      engine.stop();
+      engine.setPlaybackBuffer(null);
+      const sourcesBefore = ctx.sources.length;
+      ok(!wasPlaying, '暂停时定位：操作前状态为暂停');
+      if (wasPlaying) engine.play(8);
+      same(ctx.sources.length, sourcesBefore, '暂停时定位：不创建新音源');
+      ok(!engine.playing, '暂停时定位：定位后保持暂停');
+    }
     engine.dispose();
   }
 
